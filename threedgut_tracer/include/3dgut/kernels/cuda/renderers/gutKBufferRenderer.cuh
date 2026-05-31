@@ -21,6 +21,7 @@
 struct HitParticle {
     static constexpr float InvalidHitT = -1.0f;
     int idx                            = -1;
+    // distance/depth
     float hitT                         = InvalidHitT;
     float alpha                        = 0.0f;
 };
@@ -30,6 +31,7 @@ struct HitParticleKBuffer {
     __device__ HitParticleKBuffer() {
         m_numHits = 0;
 #pragma unroll
+        // fill in the HitParticleKBuffer the struc HitParticle with 4 variables.
         for (int i = 0; i < K; ++i) {
             m_kbuffer[i] = HitParticle();
         }
@@ -45,6 +47,13 @@ struct HitParticleKBuffer {
             m_numHits++;
         }
 #pragma unroll
+        // 1. compare hitT(depth) the newly hit particle with the last hit particle in the k-buffer.
+        // 2. replace the last hit particle with the newly hit particle if the newly hit particle is farther.
+        // 3. the last hit particle now is compare with the second last particle.
+        // 4. replace the second last hit particle with the last hit particle if the last hit particle is farther.
+        // 5. the second last hit particle now is compare with the third last particle.
+        // The process goes on untill the first hit particle, the hit particle that get kick out because they are the closest and-
+        // the k-buffer is full will be integrate
         for (int i = K - 1; i >= 0; --i) {
             if (hitParticle.hitT > m_kbuffer[i].hitT) {
                 const HitParticle tmp = m_kbuffer[i];
@@ -76,6 +85,7 @@ private:
 };
 
 template <>
+// this is the default pipeline when k=0
 struct HitParticleKBuffer<0> {
     constexpr inline __device__ void insert(HitParticle& hitParticle) const {}
     constexpr inline __device__ HitParticle operator[](int) const { return HitParticle(); }
@@ -151,6 +161,7 @@ struct GUTKBufferRenderer : Params {
             ray.transmittance *= (1.0 - hitParticle.alpha);
 
         } else {
+            // forward
             const float hitWeight =
                 particles.densityIntegrateHit(hitParticle.alpha,
                                               ray.transmittance,
@@ -270,6 +281,7 @@ struct GUTKBufferRenderer : Params {
                     (hitParticle.hitT < ray.tMinMax.y)) {
 
                     if (hitParticleKBuffer.full()) {
+                        // process the closest hit particle, which is at m_kbuffer[0]
                         processHitParticle(ray,
                                            hitParticleKBuffer.closestHit(hitParticle),
                                            particles,
@@ -283,6 +295,7 @@ struct GUTKBufferRenderer : Params {
 
         if constexpr (Params::KHitBufferSize > 0) {
             for (int i = 0; ray.isAlive() && (i < hitParticleKBuffer.numHits()); ++i) {
+                // process all particle in the m_kbuffer
                 processHitParticle(ray,
                                    hitParticleKBuffer[Params::KHitBufferSize - hitParticleKBuffer.numHits() + i],
                                    particles,

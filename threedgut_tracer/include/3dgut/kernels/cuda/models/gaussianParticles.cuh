@@ -250,7 +250,7 @@ static inline __device__ float particleResponseGrd(float grayDist, float gres, f
     case 0: // Linear
     {
         /* static const */ float s = -0.329630334487;
-        return gres > 0.f ? (0.5f * s * rsqrtf(grayDist)) * gresGrd : 0.f;
+        return gres > 0.f ? (0.5f * s * rsqrt(grayDist)) * gresGrd : 0.f;
     }
     default: // Quadratic
     {

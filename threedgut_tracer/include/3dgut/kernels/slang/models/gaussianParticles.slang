@@ -232,9 +232,9 @@ bool hit(
 [BackwardDifferentiable][ForceInline]
 float integrateHit<let backToFront : bool>(
     in float alpha,
-    inout float transmittance,
+    inout float transmittance, // this get composite
     in float depth,
-    inout float integratedDepth,
+    inout float integratedDepth, // this get composite
     no_diff bool enableNormal,
     in float3 normal,
     inout float3 integratedNormal)

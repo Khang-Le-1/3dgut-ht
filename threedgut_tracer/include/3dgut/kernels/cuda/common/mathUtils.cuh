@@ -379,7 +379,7 @@ static __device__ inline float length(const float3& v) {
 
 static __device__ inline float3 safe_normalize(float3 v) {
     const float l = v.x * v.x + v.y * v.y + v.z * v.z;
-    return l > 0.0f ? (v * rsqrtf(l)) : v;
+    return l > 0.0f ? (v * rsqrt(l)) : v;
 }
 
 static __device__ inline void bwd_safe_normalize(const float3 v, float3& d_v, float3 d_out) {
@@ -398,7 +398,7 @@ static __device__ inline void bwd_safe_normalize(const float3 v, float3& d_v, fl
 //     const float l = v.x * v.x + v.y * v.y + v.z * v.z;
 //     if (l > 0.0f)
 //     {
-//         const float il = rsqrtf(l);
+//         const float il = rsqrt(l);
 //         const float il3 = il * il * il;
 //         return make_float3((d_out.x * (v.y * v.y + v.z * v.z) - d_out.y * (v.x * v.y) - d_out.z * (v.x * v.z)),
 //                            (d_out.y * (v.x * v.x + v.z * v.z) - d_out.x * (v.y * v.x) - d_out.z * (v.y * v.z)),
@@ -410,7 +410,7 @@ static __device__ inline void bwd_safe_normalize(const float3 v, float3& d_v, fl
 static __device__ inline float3 safe_normalize_bw(const float3& v, const float3& d_out) {
     const float l = v.x * v.x + v.y * v.y + v.z * v.z;
     if (l > 0.0f) {
-        const float il  = rsqrtf(l);
+        const float il  = rsqrt(l);
         const float il3 = (il * il * il);
         return il * d_out - il3 * make_float3(d_out.x * (v.x * v.x) + d_out.y * (v.y * v.x) + d_out.z * (v.z * v.x),
                                               d_out.x * (v.x * v.y) + d_out.y * (v.y * v.y) + d_out.z * (v.z * v.y),
