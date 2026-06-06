@@ -18,9 +18,11 @@
 #include <3dgut/kernels/cuda/common/rayPayloadBackward.cuh>
 #include <3dgut/renderer/gutRendererParameters.h>
 
+#include <limits>
+
 struct HitParticle {
-    static constexpr float InvalidHitT = -1.0f;
-    int idx                            = -1;
+    static constexpr float InvalidHitT = __FLT_MAX__;
+    int idx                            = __INT_MAX__;
     // distance/depth
     float hitT                         = InvalidHitT;
     float alpha                        = 0.0f;
@@ -55,7 +57,7 @@ struct HitParticleKBuffer {
         // The process goes on untill the first hit particle, the hit particle that get kick out because they are the closest and-
         // the k-buffer is full will be integrate
         for (int i = K - 1; i >= 0; --i) {
-            if (hitParticle.hitT > m_kbuffer[i].hitT) {
+            if (hitParticle.hitT < m_kbuffer[i].hitT) {
                 const HitParticle tmp = m_kbuffer[i];
                 m_kbuffer[i]          = hitParticle;
                 hitParticle           = tmp;
@@ -76,6 +78,10 @@ struct HitParticleKBuffer {
     }
 
     inline __device__ const HitParticle& closestHit(const HitParticle&) const {
+        return m_kbuffer[K-1];
+    }
+
+    inline __device__ const HitParticle& farthestHit(const HitParticle&) const {
         return m_kbuffer[0];
     }
 
@@ -168,6 +174,7 @@ struct GUTKBufferRenderer : Params {
                                               hitParticle.hitT,
                                               ray.hitT);
 
+            // so the final raidance ends up in ray.features, which is color
             particles.featureIntegrateFwd(hitWeight,
                                           Params::PerRayParticleFeatures ? particles.featuresFromBuffer(hitParticle.idx, ray.direction) : tcnn::max(particleFeatures[hitParticle.idx], 0.f),
                                           ray.features);
@@ -179,6 +186,31 @@ struct GUTKBufferRenderer : Params {
         if (ray.transmittance < Particles::MinTransmittanceThreshold) {
             ray.kill();
         }
+    }
+
+    template <typename TRayPayload>
+    // not using the densityIntegrateHit or the featureIntegrateFwd for now
+    static inline __device__ void processHitParticle_tail(
+        TRayPayload& ray,
+        const HitParticle& hitParticle,
+        const Particles& particles,
+        const TFeaturesVec* __restrict__ particleFeatures,
+        TFeaturesVec& tailFeaturesSum,
+        float& tailAlphaSum,
+        float& tailTransmittance) {
+
+        // features are color calculated in sphericalHarmonics.slang
+        TFeaturesVec features = Params::PerRayParticleFeatures ? particles.featuresFromBuffer(hitParticle.idx, ray.direction) : tcnn::max(particleFeatures[hitParticle.idx], 0.f);
+
+        tailAlphaSum += hitParticle.alpha;
+        // in HTGS: transmittance_tail *= 1.0f - rgba.w;
+        tailTransmittance *= (1.0f - hitParticle.alpha);
+
+        #pragma unroll
+        for (int i = 0; i < Particles::FeaturesDim; ++i) {
+            tailFeaturesSum[i] += features[i] * hitParticle.alpha;
+        }
+
     }
 
     template <typename TRay>
@@ -241,6 +273,11 @@ struct GUTKBufferRenderer : Params {
 
         HitParticleKBuffer<Params::KHitBufferSize> hitParticleKBuffer;
 
+        // tail variables
+        TFeaturesVec tailFeaturesSum = TFeaturesVec::zero();
+        float tailAlphaSum = 0.0f;
+        float tailTransmittance = 1.0f;
+
         for (uint32_t i = 0; i < tileNumBlocksToProcess; i++, tileNumParticlesToProcess -= GUTParameters::Tiling::BlockSize) {
 
             if (__syncthreads_and(!ray.isAlive())) {
@@ -281,9 +318,9 @@ struct GUTKBufferRenderer : Params {
                     (hitParticle.hitT < ray.tMinMax.y)) {
 
                     if (hitParticleKBuffer.full()) {
-                        // process the closest hit particle, which is at m_kbuffer[0]
-                        processHitParticle(ray,
-                                           hitParticleKBuffer.closestHit(hitParticle),
+                        // process the farthest hit particle, which is at m_kbuffer[0]
+                        processHitParticle_tail(ray,
+                                           hitParticleKBuffer.farthestHitHit(hitParticle),
                                            particles,
                                            particleFeaturesBuffer,
                                            particleFeaturesGradientBuffer);
@@ -294,13 +331,25 @@ struct GUTKBufferRenderer : Params {
         }
 
         if constexpr (Params::KHitBufferSize > 0) {
+            // process core
             for (int i = 0; ray.isAlive() && (i < hitParticleKBuffer.numHits()); ++i) {
-                // process all particle in the m_kbuffer
                 processHitParticle(ray,
                                    hitParticleKBuffer[Params::KHitBufferSize - hitParticleKBuffer.numHits() + i],
                                    particles,
                                    particleFeaturesBuffer,
                                    particleFeaturesGradientBuffer);
+            }
+
+            if (tailAlphaSum > 0.0f) {
+                float alphaSumRcp = 1.0f / tailAlphaSum;
+                // in HTGS: weighted_rgb_tail = transmittance_core * (1.0f - transmittance_tail) * alpha_sum_tail_rcp * rgb_tail;
+                float tailWeight = ray.transmittance * (1.0f - tailTransmittance) * alphaSumRcp;
+
+                #pragma unroll
+                for (int i = 0; i < Particles::FeaturesDim; ++i) {
+                    // ray.features is color, in HTGS: rgb_pixel += weighted_rgb_tail;
+                    ray.features[i] += tailWeight * tailFeaturesSum[i];
+                }
             }
         }
     }
@@ -385,7 +434,7 @@ struct GUTKBufferRenderer : Params {
 
                         validHit = true;
 
-                        // Get Gaussian features
+                        // Get Gaussian features(color) by calculating with Spherical Harmonics
                         if constexpr (Params::PerRayParticleFeatures) {
                             hitFeatures = particles.featuresFromBuffer(particleIdx, ray.direction);
                         } else {
