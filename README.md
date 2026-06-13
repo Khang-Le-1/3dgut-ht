@@ -89,7 +89,7 @@ For projects that require a fast, modular, and production-ready Gaussian Splatti
 - [💻 2. Train 3DGRT or 3DGUT scenes](#-2-train-3dgrt-or-3dgut-scenes)
   - [Training on NCore v4 datasets](#training-on-ncore-v4-datasets)
   - [Using image masks](#using-image-masks)
-  - [Exporting USDZ for use in Omniverse and Isaac Sim](#exporting-usdz-for-use-in-omniverse-and-isaac-sim)
+  - [Exporting trained scenes (USD, PLY, NuRec)](#exporting-trained-scenes-usd-ply-nurec)
 - [🎥 3. Rendering from Checkpoints](#-3-rendering-from-checkpoints)
   - [To visualize training progress interactively](#to-visualize-training-progress-interactively)
   - [To visualize a pre-trained checkpoint](#to-visualize-a-pre-trained-checkpoint)
@@ -104,7 +104,7 @@ For projects that require a fast, modular, and production-ready Gaussian Splatti
 - For good performance with 3DGRT, we recommend using an NVIDIA GPU with Ray Tracing (RT) cores.
 - Both Linux and Windows are supported via UV install scripts.
 
-### Option A: Using UV (Recommended)
+### Using UV
 
 (Kindly contributed by [@MasahiroOgawa](https://github.com/MasahiroOgawa))
 
@@ -115,6 +115,7 @@ git clone --recursive https://github.com/nv-tlabs/3dgrut.git
 cd 3dgrut
 ```
 
+<br/>
 <details open>
 <summary><strong>Linux</strong></summary>
 
@@ -159,6 +160,7 @@ source .venv/bin/activate
 
 </details>
 
+<br/>
 <details>
 <summary><strong>Windows</strong></summary>
 
@@ -193,32 +195,6 @@ This also sets the build environment variables (`TORCH_CUDA_ARCH_LIST`, `CUDA_HO
 
 </details>
 
-### Option B: Using Legacy Conda Script
-
-<details>
-<summary>Legacy Conda Installation via <code>install_env.sh</code> (CUDA 11.8.0 / 12.8.1 only)</summary>
-</br>
-
-> [!NOTE]
-> `install_env.sh` is a legacy script that only supports CUDA 11.8.0 and 12.8.1 and requires
-> manual GCC management. For new setups, prefer **Sub-option A1** above, which supports more
-> CUDA versions and handles GCC compatibility automatically.
-
-```bash
-git clone --recursive https://github.com/nv-tlabs/3dgrut.git
-cd 3dgrut
-chmod +x install_env.sh
-./install_env.sh 3dgrut
-conda activate 3dgrut
-```
-
-If your system GCC is newer than 11, install `gcc-11` first and pass the `WITH_GCC11` flag:
-```sh
-sudo apt-get install gcc-11 g++-11
-./install_env.sh 3dgrut WITH_GCC11
-```
-</details>
-
 ### Blackwell / RTX 50 series Support
 
 We support CUDA 12.8 (Blackwell / RTX 50 series) — kindly contributed by <a href="https://www.github.com/johnnynunez">@johnnynunez</a>:
@@ -237,16 +213,11 @@ source .venv/bin/activate
 
 ### Building and Running with Docker
 
-To build the Docker image:
-```sh
-docker build --build-arg CUDA_VERSION=12.8.1 -t 3dgrut:cuda128 .
-```
-
 Build the Docker image:
-```bash
-git clone --recursive https://github.com/nv-tlabs/3dgrut.git
-cd 3dgrut
-docker build . -t 3dgrut
+```sh
+docker build --build-arg CUDA_VERSION=12.8.1 -t 3dgrut:cuda12 .
+docker build --build-arg CUDA_VERSION=11.8.0 --build-arg UBUNTU_VERSION=22.04 -t 3dgrut:cuda11 .
+docker buildx build --platform linux/amd64,linux/arm64 --build-arg CUDA_VERSION=13.0.2 -t 3dgrut:cuda13 .
 ```
 
 Run it:
@@ -304,6 +275,16 @@ python train.py --config-name apps/colmap_3dgrt.yaml path=data/mipnerf360/bonsai
 python train.py --config-name apps/colmap_3dgut.yaml path=data/mipnerf360/bonsai out_dir=runs experiment_name=bonsai_3dgut dataset.downsample_factor=2 optimizer.type=selective_adam
 ```
 
+### Post-processing (linear-to-sRGB and PPISP)
+
+Hydra key: ``post_processing.method``. Values:
+
+- **null** (default): no change to rendered RGB before the loss.
+- **linear-to-srgb**: **IEC 61966-2-1** piecewise linear-to-sRGB encoding on ``pred_rgb``.
+- **ppisp**: physically plausible image signal processing; requires the ``ppisp`` package. PPISP
+  learns exposure, color, vignetting, and camera response corrections. When configured with a
+  controller, it can also predict exposure and color latents from each rendered view.
+
 If you use MCMC and Selective Adam in your research, please cite [3dgs-mcmc](https://github.com/ubc-vision/3dgs-mcmc), [taming-3dgs](https://github.com/humansensinglab/taming-3dgs),
 and the [gSplat](https://github.com/nerfstudio-project/gsplat/tree/main) library from which the code was adopted (links to the code are provided in the source files).
 
@@ -321,42 +302,24 @@ The provided masks should have the same resolution as their corresponding images
 
 **NOTE**: The masks are only used for loss computation and not for computing the metrics.
 
-### Exporting USDZ for use in Omniverse and Isaac Sim
+### Exporting trained scenes (USD, PLY, NuRec)
 
-As a beta feature, Omniverse Kit 107.3 and Isaac Sim 5.0 are able to support rendering 3D Gaussians in a specific custom USDZ-based format that uses an extension of the UsdVolVolume Schema.
-
-The 3DGRUT repository can output trained scenes to this format by enabling the `export_usd` flag:
+Trained scenes can be exported to USD ([`ParticleField`](https://openusd.org/release/user_guides/schemas/usdVol/ParticleField.html)), NuRec USDZ for Omniverse,
+or PLY, and transcoded between these formats. The simplest path is to enable export at the end of
+training:
 
 ```bash
 python train.py --config-name apps/colmap_3dgut.yaml path=data/mipnerf360/garden/ out_dir=runs experiment_name=garden_3dgut dataset.downsample_factor=2 export_usd.enabled=true
 ```
 
 > [!NOTE]
-> The USD output schema is currently compatible with Isaac Sim 5.0, but how USD and reconstruction workflows work together is highly likely to change in future versions. This is a beta feature.
+> While Isaac Sim 6.0 supports both the `ParticleField` (standard USD) schema and the custom NuRec USDZ
+> output, custom NuRec USDZ is going to be deprecated and replaced by `ParticleField`. Prefer `ParticleField`
+> for new assets.
 
-#### Converting PLY files to USDZ
-
-If you have existing Gaussian data in PLY format, for example, from 3DGS, you can convert it to the USDZ format using the `ply_to_usd.py` script:
-
-```bash
-python -m threedgrut.export.scripts.ply_to_usd path/to/your/model.ply --output_file path/to/output.usdz
-```
-
-This is useful for converting 3DGS models from other sources to the USDZ format. Note that the resulting USDZ does not include a mesh. If you need a mesh inside the USDZ (e.g. for collision geometry), follow the next step.
-
-#### Adding a Mesh to a USDZ File
-
-You can add a mesh (PLY or USD) into an existing USDZ file using the `add_mesh_to_usdz.py` script. This is useful for producing USDZ assets with physics properties such as collision geometry.
-
-
-```bash
-python -m threedgrut.export.scripts.add_mesh_to_usdz --input_usdz path/to/input.usdz --output_usdz path/to/output.usdz --mesh_ply path/to/mesh.ply --set_collision
-```
-
-Optional flags:
-- `--set_collision` — enable collision on mesh prims.
-- `--set_invisible` — make mesh prims invisible.
-- `--referencing_usd` — specify which USD file in the package to modify (default: auto-detect the one with a Volume prim).
+For the full set of export workflows — standalone USD export, PLY ⇄ USD ⇄ NuRec transcoding,
+PLY→USDZ conversion, adding meshes to USDZ, and PPISP post-processing export — see the export
+documentation: [`threedgrut/export/README.md`](threedgrut/export/README.md).
 
 ## 🎥 3. Rendering from Checkpoints
 Evaluate a checkpoint with splatting, the OptiX tracer, or PyTorch:

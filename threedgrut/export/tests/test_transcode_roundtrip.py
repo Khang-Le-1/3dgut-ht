@@ -21,16 +21,111 @@ Run with: pytest threedgrut/export/tests/test_transcode_roundtrip.py -v
 """
 
 import tempfile
+import zipfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+pytest.importorskip("pxr", reason="usd-core (pxr) is only available on linux x86_64")
+
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdVol
+
 from threedgrut.export.accessor import GaussianAttributes, ModelCapabilities
 from threedgrut.export.adapter import AttributesExportAdapter
 from threedgrut.export.formats import PLYExporter
 from threedgrut.export.importers import PLYImporter, USDImporter
+from threedgrut.export.scripts.transcode import detect_input_format, transcode
+from threedgrut.export.transforms import usd_matrix_to_numpy
 from threedgrut.export.usd.exporter import USDExporter
+
+
+class MockCameraDataset:
+    """Minimal dataset exposing camera poses for USD camera export tests."""
+
+    image_w = 640
+    image_h = 480
+    intrinsics = [500.0, 500.0, 320.0, 240.0]
+
+    def __len__(self) -> int:
+        return 2
+
+    def get_poses(self) -> np.ndarray:
+        poses = np.repeat(np.eye(4, dtype=np.float64)[None, :, :], len(self), axis=0)
+        poses[1, 0, 3] = 1.0
+        return poses
+
+    def get_camera_names(self):
+        return ["camera_0000"]
+
+    def get_camera_idx(self, frame_idx: int) -> int:
+        return 0
+
+
+def _write_fake_cuda_spg_sidecars(root: Path) -> None:
+    (root / "ppisp_fake_spg.usda").write_text(
+        """#usda 1.0
+(
+    defaultPrim = "PPISP"
+)
+
+def Shader "PPISP"
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:spg:sourceAsset = @./ppisp_fake_spg.cu@
+    uniform token info:spg:sourceAsset:subIdentifier = "fakeProcess"
+}
+""",
+        encoding="utf-8",
+    )
+    (root / "ppisp_fake_spg.cu").write_text("// fake CUDA SPG source\n", encoding="utf-8")
+    (root / "ppisp_fake_spg.cu.lua").write_text("-- fake CUDA SPG launcher\n", encoding="utf-8")
+
+
+def _add_fake_cuda_spg_to_render_product(stage: Usd.Stage) -> None:
+    shader = stage.DefinePrim("/Render/camera_0000/PPISP", "Shader")
+    shader.GetReferences().AddReference("ppisp_fake_spg.usda")
+    shader.CreateAttribute("info:implementationSource", Sdf.ValueTypeNames.Token, custom=False).Set("sourceAsset")
+    shader.CreateAttribute("info:spg:sourceAsset", Sdf.ValueTypeNames.Asset, custom=False).Set(
+        Sdf.AssetPath("ppisp_fake_spg.cu")
+    )
+    shader.CreateAttribute("info:spg:sourceAsset:subIdentifier", Sdf.ValueTypeNames.Token, custom=False).Set(
+        "fakeProcess"
+    )
+
+
+def _find_particlefield_prim(stage: Usd.Stage) -> Usd.Prim:
+    for prim in stage.Traverse():
+        if prim.IsA(UsdVol.ParticleField):
+            return prim
+    raise AssertionError("No ParticleField prim found")
+
+
+def _find_nurec_volume_prim(stage: Usd.Stage) -> Usd.Prim:
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "Volume":
+            continue
+        attr = prim.GetAttribute("omni:nurec:isNuRecVolume")
+        if attr.IsValid() and attr.Get():
+            return prim
+    raise AssertionError("No NuRec volume prim found")
+
+
+def _set_source_gaussian_root_transform(stage: Usd.Stage) -> Gf.Matrix4d:
+    gaussian_prim = _find_particlefield_prim(stage)
+    root = gaussian_prim.GetParent()
+    matrix = Gf.Matrix4d(1.0)
+    matrix.SetTranslate(Gf.Vec3d(1.25, -2.5, 0.75))
+    UsdGeom.Xformable(root).AddTransformOp(opSuffix="testPose").Set(matrix)
+    return UsdGeom.Xformable(gaussian_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+
+
+def _assert_usd_matrices_close(actual: Gf.Matrix4d, expected: Gf.Matrix4d) -> None:
+    assert np.allclose(usd_matrix_to_numpy(actual), usd_matrix_to_numpy(expected), atol=1e-6)
+
+
+def _xform_op_order(prim: Usd.Prim) -> list[str]:
+    return [str(token) for token in prim.GetAttribute("xformOpOrder").Get()]
 
 
 def create_test_attributes(num_gaussians: int = 100, sh_degree: int = 3) -> GaussianAttributes:
@@ -214,6 +309,359 @@ class TestUSDLightFieldRoundTrip:
 
 class TestCrossFormatTranscode:
     """Test transcoding between different formats."""
+
+    def test_transcode_api_ply_to_lightfield(self):
+        """Test the transcode entrypoint converts PLY to USD LightField."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ply_path = Path(tmpdir) / "input.ply"
+            usd_path = Path(tmpdir) / "output.usdz"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            PLYExporter().export(adapter, ply_path)
+
+            transcode(
+                input_path=ply_path,
+                output_path=usd_path,
+                output_format="lightfield",
+                render_order_hint="rayHitDistance",
+                validate_usd=False,
+            )
+
+            assert usd_path.exists()
+            assert detect_input_format(usd_path) == "lightfield"
+
+            loaded_attrs, _ = USDImporter().load(usd_path)
+            expected_attrs = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            expected_post = GaussianAttributes(
+                positions=expected_attrs.get_positions().cpu().numpy(),
+                rotations=expected_attrs.get_rotation(preactivation=False).cpu().numpy(),
+                scales=expected_attrs.get_scale(preactivation=False).cpu().numpy(),
+                densities=expected_attrs.get_density(preactivation=False).cpu().numpy(),
+                albedo=expected_attrs.get_features_albedo().cpu().numpy(),
+                specular=expected_attrs.get_features_specular().cpu().numpy(),
+            )
+            results = compare_attributes(expected_post, loaded_attrs, rtol=1e-4, atol=1e-5)
+            for attr_name, result in results.items():
+                assert result["match"], f"PLY→USD transcode failed for {attr_name}: {result}"
+
+    def test_transcode_api_ply_to_nurec_without_dataset(self):
+        """PLY→NuRec transcode does not require regenerated camera data."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            ply_path = tmp_path / "input.ply"
+            output_path = tmp_path / "output.usdz"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            PLYExporter().export(adapter, ply_path)
+
+            transcode(
+                input_path=ply_path,
+                output_path=output_path,
+                output_format="nurec",
+                validate_usd=False,
+            )
+
+            assert output_path.exists()
+            assert detect_input_format(output_path) == "nurec"
+            stage = Usd.Stage.Open(str(output_path))
+            render_settings = stage.GetRootLayer().customLayerData["renderSettings"]
+            assert render_settings["rtx:post:registeredCompositing:invertToneMap"] is True
+            assert render_settings["rtx:post:registeredCompositing:invertColorCorrection"] is True
+            assert "rtx:rtpt:gaussian:skipTonemapping:enabled" not in render_settings
+            with zipfile.ZipFile(output_path) as zf:
+                names = set(zf.namelist())
+            assert {"default.usda", "gauss.usda", "output.nurec"} <= names
+
+    def test_transcode_api_lightfield_to_ply_roundtrip(self):
+        """Test the transcode entrypoint converts USD LightField back to PLY."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            usd_path = Path(tmpdir) / "input.usdz"
+            ply_path = Path(tmpdir) / "output.ply"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=False,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, usd_path, validate_usd=False)
+
+            transcode(
+                input_path=usd_path,
+                output_path=ply_path,
+                output_format="ply",
+                max_sh_degree=3,
+                validate_usd=False,
+            )
+
+            assert ply_path.exists()
+            assert detect_input_format(ply_path) == "ply"
+
+            loaded_attrs, _ = PLYImporter(max_sh_degree=3).load(ply_path)
+            results = compare_attributes(attrs, loaded_attrs, rtol=1e-2, atol=1e-3)
+            for attr_name, result in results.items():
+                assert result["match"], f"USD→PLY transcode failed for {attr_name}: {result}"
+
+    def test_transcode_api_usd_to_usd_copies_render_products(self):
+        """USD→USD transcode preserves source /Render RenderProducts."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "input.usda"
+            output_path = tmp_path / "output.usda"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=True,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, input_path, dataset=MockCameraDataset(), validate_usd=False)
+
+            transcode(
+                input_path=input_path,
+                output_path=output_path,
+                output_format="lightfield",
+                copy_cameras_source=(input_path, tmp_path),
+                validate_usd=False,
+            )
+
+            stage = Usd.Stage.Open(str(output_path))
+            assert stage
+            assert stage.GetStartTimeCode() == 0.0
+            assert stage.GetEndTimeCode() == 1.0
+            product = stage.GetPrimAtPath("/Render/camera_0000")
+            assert product.IsValid()
+            assert product.GetTypeName() == "RenderProduct"
+            assert product.GetRelationship("camera").GetTargets() == [Sdf.Path("/World/Cameras/camera_0000")]
+            assert tuple(product.GetAttribute("resolution").Get()) == (640, 480)
+            assert product.GetRelationship("orderedVars").GetTargets() == [Sdf.Path("/Render/camera_0000/LdrColor")]
+
+    def test_transcode_api_usd_to_usd_preserves_source_gaussian_pose(self):
+        """USD→USD transcode preserves the source Gaussian local-to-world pose."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "input.usda"
+            output_path = tmp_path / "output.usda"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=False,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, input_path, validate_usd=False)
+
+            stage = Usd.Stage.Open(str(input_path))
+            assert stage
+            expected_matrix = _set_source_gaussian_root_transform(stage)
+            stage.GetRootLayer().Export(str(input_path))
+
+            transcode(
+                input_path=input_path,
+                output_path=output_path,
+                output_format="lightfield",
+                copy_cameras_source=(input_path, tmp_path),
+                validate_usd=False,
+            )
+
+            output_stage = Usd.Stage.Open(str(output_path))
+            assert output_stage
+            output_prim = _find_particlefield_prim(output_stage)
+            output_matrix = UsdGeom.Xformable(output_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            _assert_usd_matrices_close(output_matrix, expected_matrix)
+
+    def test_transcode_api_usd_to_usdz_copies_cuda_spg_sidecars(self):
+        """USD→USDZ transcode preserves copied /Render CUDA SPG sidecars."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "input.usda"
+            output_path = tmp_path / "output.usdz"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=True,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, input_path, dataset=MockCameraDataset(), validate_usd=False)
+
+            stage = Usd.Stage.Open(str(input_path))
+            assert stage
+            _add_fake_cuda_spg_to_render_product(stage)
+            stage.GetRootLayer().Export(str(input_path))
+            _write_fake_cuda_spg_sidecars(tmp_path)
+
+            transcode(
+                input_path=input_path,
+                output_path=output_path,
+                output_format="lightfield",
+                copy_cameras_source=(input_path, tmp_path),
+                validate_usd=False,
+            )
+
+            stage = Usd.Stage.Open(str(output_path))
+            assert stage
+            assert stage.GetStartTimeCode() == 0.0
+            assert stage.GetEndTimeCode() == 1.0
+            assert stage.GetPrimAtPath("/Render/camera_0000/PPISP").IsValid()
+            with zipfile.ZipFile(output_path) as zf:
+                names = set(zf.namelist())
+            assert {"ppisp_fake_spg.usda", "ppisp_fake_spg.cu", "ppisp_fake_spg.cu.lua"} <= names
+
+    def test_transcode_api_usd_to_nurec_copies_render_products_and_cuda_spg_sidecars(self):
+        """USD→NuRec transcode preserves source /Render and CUDA SPG sidecars."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "input.usda"
+            output_path = tmp_path / "output.usdz"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=True,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, input_path, dataset=MockCameraDataset(), validate_usd=False)
+
+            stage = Usd.Stage.Open(str(input_path))
+            assert stage
+            _add_fake_cuda_spg_to_render_product(stage)
+            stage.GetRootLayer().Export(str(input_path))
+            _write_fake_cuda_spg_sidecars(tmp_path)
+
+            transcode(
+                input_path=input_path,
+                output_path=output_path,
+                output_format="nurec",
+                copy_cameras_source=(input_path, tmp_path),
+                validate_usd=False,
+            )
+
+            stage = Usd.Stage.Open(str(output_path))
+            assert stage
+            assert stage.GetStartTimeCode() == 0.0
+            assert stage.GetEndTimeCode() == 1.0
+            assert not stage.GetPrimAtPath("/World/gaussians").IsValid()
+            assert stage.GetPrimAtPath("/Render/camera_0000").IsValid()
+            assert stage.GetPrimAtPath("/Render/camera_0000/PPISP").IsValid()
+            render_settings = stage.GetRootLayer().customLayerData["renderSettings"]
+            assert render_settings["rtx:post:registeredCompositing:invertToneMap"] is False
+            assert render_settings["rtx:post:registeredCompositing:invertColorCorrection"] is False
+            assert render_settings["rtx:rtpt:gaussian:skipTonemapping:enabled"] is False
+            with zipfile.ZipFile(output_path) as zf:
+                names = set(zf.namelist())
+                gauss_usda = zf.read("gauss.usda").decode("utf-8")
+            assert {"ppisp_fake_spg.usda", "ppisp_fake_spg.cu", "ppisp_fake_spg.cu.lua"} <= names
+            assert "renderSettings" in gauss_usda
+            assert "rtx:post:registeredCompositing:invertToneMap" in gauss_usda
+            assert "rtx:post:registeredCompositing:invertColorCorrection" in gauss_usda
+            assert "rtx:rtpt:gaussian:skipTonemapping:enabled" in gauss_usda
+
+    def test_transcode_api_usd_to_nurec_preserves_source_gaussian_pose(self):
+        """USD→NuRec transcode preserves the source Gaussian local-to-world pose."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "input.usda"
+            output_path = tmp_path / "output.usdz"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=False,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, input_path, validate_usd=False)
+
+            stage = Usd.Stage.Open(str(input_path))
+            assert stage
+            expected_matrix = _set_source_gaussian_root_transform(stage)
+            stage.GetRootLayer().Export(str(input_path))
+
+            transcode(
+                input_path=input_path,
+                output_path=output_path,
+                output_format="nurec",
+                copy_cameras_source=(input_path, tmp_path),
+                validate_usd=False,
+            )
+
+            output_stage = Usd.Stage.Open(str(output_path))
+            assert output_stage
+            output_prim = _find_nurec_volume_prim(output_stage)
+            output_matrix = UsdGeom.Xformable(output_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            _assert_usd_matrices_close(output_matrix, expected_matrix)
+
+    def test_transcode_coordinate_transform_order_matches_nurec(self):
+        """USD→USD and USD→NuRec compose source pose and coordinate transform identically."""
+        attrs = create_test_attributes(32, sh_degree=3)
+        caps = create_test_capabilities(32, sh_degree=3)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "input.usda"
+            output_lightfield_path = tmp_path / "output_lightfield.usda"
+            output_nurec_path = tmp_path / "output_nurec.usdz"
+
+            adapter = AttributesExportAdapter(attrs, caps, is_preactivation=True)
+            USDExporter(
+                export_cameras=False,
+                export_background=False,
+                apply_normalizing_transform=False,
+            ).export(adapter, input_path, validate_usd=False)
+
+            stage = Usd.Stage.Open(str(input_path))
+            assert stage
+            _set_source_gaussian_root_transform(stage)
+            stage.GetRootLayer().Export(str(input_path))
+
+            transcode(
+                input_path=input_path,
+                output_path=output_lightfield_path,
+                output_format="lightfield",
+                apply_coordinate_transform=True,
+                validate_usd=False,
+            )
+            transcode(
+                input_path=input_path,
+                output_path=output_nurec_path,
+                output_format="nurec",
+                apply_coordinate_transform=True,
+                validate_usd=False,
+            )
+
+            lightfield_stage = Usd.Stage.Open(str(output_lightfield_path))
+            assert lightfield_stage
+            lightfield_prim = _find_particlefield_prim(lightfield_stage)
+            lightfield_root = lightfield_prim.GetParent()
+
+            nurec_stage = Usd.Stage.Open(str(output_nurec_path))
+            assert nurec_stage
+            nurec_prim = _find_nurec_volume_prim(nurec_stage)
+
+            assert _xform_op_order(lightfield_root) == ["xformOp:transform:sourcePose", "xformOp:transform"]
+            assert _xform_op_order(nurec_prim) == ["xformOp:transform:sourcePose", "xformOp:transform"]
+
+            lightfield_matrix = UsdGeom.Xformable(lightfield_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            nurec_matrix = UsdGeom.Xformable(nurec_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            _assert_usd_matrices_close(lightfield_matrix, nurec_matrix)
 
     def test_ply_to_usd_to_ply(self):
         """Test PLY → USD LightField → PLY transcode chain."""
