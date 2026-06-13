@@ -42,11 +42,36 @@ export_usd:
   enabled: false
   path: ""
   apply_normalizing_transform: true
-  format: standard  # "nurec" for Omniverse USDVol internal format, "standard" for USDVol ParticleField3DGaussianSplat
+  format: standard  # "nurec" for internal USDVol format, "standard" for USDVol ParticleField3DGaussianSplat
   half_precision: false
   export_cameras: true
   export_background: true
+  # zDepth | cameraDistance | rayHitDistance
   sorting_mode_hint: cameraDistance
+  # Enable post-processing export when the checkpoint contains a supported module.
+  # Defaults to true; ppisp-integration-mode controls how PPISP is exported.
+  export_post_processing: true
+  # spg-runtime authors PPISP as Omniverse SPG shaders applied at render time.
+  # sh-optimized folds one fixed PPISP transform into Gaussian SH coefficients.
+  # spg-runtime | sh-optimized
+  ppisp-integration-mode: spg-runtime
+  # Optional fixed PPISP camera/frame. sh-optimized defaults unset values to 0;
+  # spg-runtime keeps dynamic per-camera/per-frame behavior when unset.
+  ppisp-reference-camera-id: null
+  ppisp-reference-frame-id: null
+  # Achromatic PPISP responsivity default authored on spg-runtime SPG shaders.
+  # To rescale asset radiance by k while preserving the PPISP input magnitude,
+  # set scene-radiance-scale: k and ppisp-responsivity: 1/k.
+  ppisp-responsivity: 1.0
+  # null = auto-export controllers when the PPISP checkpoint has them.
+  # true = require controller export; false = force static/time-sampled fallback.
+  enable-ppisp-controller-export: null
+  # Number of optimizer steps for sh-optimized export. null uses the default (3000).
+  sh-optimization-num-iterations: null
+  # Multiplicative scale applied to exported SH radiance.
+  scene-radiance-scale: 1.0
+  # USD timeCodesPerSecond; time codes are bare frame indices so this sets playback speed
+  frames_per_second: 1.0
 
 model:
   density_activation: sigmoid
@@ -124,7 +149,8 @@ loss:
 
 # Post-processing configuration
 post_processing:
-  method: null # Possible values: null, "ppisp"
+  # null | "ppisp" | "linear-to-srgb"
+  method: null
   # Enable the controller for predicting per-frame corrections for novel views.
   # When false, zero corrections are used for novel views.
   use_controller: true
