@@ -121,6 +121,21 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                            reinterpret_cast<float3*>(integratedNormal));
     }
 
+    __forceinline__ __device__ float densityIntegrateHit_tail(float alpha,
+                                                         float& transmittance,
+                                                         float depth,
+                                                         float& integratedDepth,
+                                                         const tcnn::vec3* normal     = nullptr,
+                                                         tcnn::vec3* integratedNormal = nullptr) const {
+        return particleDensityIntegrateHit_tail(alpha,
+                                           &transmittance,
+                                           depth,
+                                           &integratedDepth,
+                                           normal != nullptr,
+                                           normal == nullptr ? make_float3(0, 0, 0) : *reinterpret_cast<const float3*>(&normal),
+                                           reinterpret_cast<float3*>(integratedNormal));
+    }
+
     __forceinline__ __device__ float densityProcessHitFwdFromBuffer(const tcnn::vec3& rayOrigin,
                                                                     const tcnn::vec3& rayDirection,
                                                                     uint32_t particleIdx,
@@ -290,6 +305,15 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                                         TFeaturesVec& integratedFeatures) const {
 
         particleFeaturesIntegrateFwd(weight,
+                                     *reinterpret_cast<const float3*>(&features),
+                                     reinterpret_cast<float3*>(&integratedFeatures));
+    }
+
+    __forceinline__ __device__ void featureIntegrateFwd_tail(float weight,
+                                                        const TFeaturesVec& features,
+                                                        TFeaturesVec& integratedFeatures) const {
+
+        particleFeaturesIntegrateFwd_tail(weight,
                                      *reinterpret_cast<const float3*>(&features),
                                      reinterpret_cast<float3*>(&integratedFeatures));
     }

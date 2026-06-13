@@ -1,32 +1,13 @@
 ## Updates
-- ✅[2026/6/6] **Hybrid Transparency foward** I implemented the forward method and benchmark with lego data set, future goal is to do the backward.
+- ✅[2026/6/13] **Hybrid Transparency foward revise setup**: Turns out that forward implimentation butchered the image quality, I am switching ways of implimentation to be in slang files.
+- ✅[2026/6/6] **Hybrid Transparency foward**: I implemented the forward method and benchmark with lego data set, future goal is to do the backward.
 
 
 ## Benchmarks
 Hybrid Transparency:
 
-| **Metric**              | **Value**                |
-| ----------------------- | ------------------------ |
-| **Mean PSNR**           | 35.240                   |
-| **Mean SSIM**           | 0.981                    |
-| **Mean LPIPS**          | 0.021                    |
-| **Mean CC PSNR**        | 35.263                   |
-| **Mean CC SSIM**        | 0.981                    |
-| **Mean CC LPIPS**       | 0.021                    |
-| **Std PSNR**            | 3.344                    |
-| **Mean Inference Time** | 5.65 ms/frame (~177 FPS) |
 Original MLAB
 
-|**Metric**|**Unmodified Value**|
-|---|---|
-|**Mean PSNR**|35.240|
-|**Mean SSIM**|0.981|
-|**Mean LPIPS**|0.021|
-|**Mean CC PSNR**|35.263|
-|**Mean CC SSIM**|0.981|
-|**Mean CC LPIPS**|0.021|
-|**Std PSNR**|3.344|
-|**Mean Inference Time**|5.97 ms/frame (~167 FPS)|
 
 
 

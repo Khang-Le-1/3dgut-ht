@@ -99,6 +99,24 @@ void integrateRadiance<let backToFront : bool>(float weight,
 }
 
 [BackwardDifferentiable][ForceInline]
+void integrateRadiance_tail<let backToFront : bool>(float weight,
+                                               in vector<float, Dim> radiance,
+                                               inout vector<float, Dim> integratedRadiance)
+{
+    if (weight > 0.0f)
+    {
+        if (backToFront)
+        {
+            integratedRadiance = lerp(integratedRadiance, radiance, weight);
+        }
+        else
+        {
+            integratedRadiance += radiance * weight;
+        }
+    }
+}
+
+[BackwardDifferentiable][ForceInline]
 void integrateRadianceFromParameters<let backToFront : bool>(float3 incidentDirection,
                                                              no_diff uint32_t sphDegree,
                                                              float weight,
@@ -155,6 +173,18 @@ inline void particleFeaturesIntegrateFwd(in float weight,
                                          inout vector<float, shRadiativeParticle.Dim> integratedFeatures)
 {
     shRadiativeParticle.integrateRadiance<false>(
+        weight,
+        features,
+        integratedFeatures
+    );
+}
+
+[CudaDeviceExport]
+inline void particleFeaturesIntegrateFwd_tail(in float weight,
+                                         in vector<float, shRadiativeParticle.Dim> features,
+                                         inout vector<float, shRadiativeParticle.Dim> integratedFeatures)
+{
+    shRadiativeParticle.integrateRadiance_tail<false>(
         weight,
         features,
         integratedFeatures

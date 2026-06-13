@@ -44,7 +44,9 @@ struct HitParticleKBuffer {
     inline __device__ void insert(HitParticle& hitParticle) {
         const bool isFull = full();
         if (isFull) {
-            m_kbuffer[0].hitT = HitParticle::InvalidHitT;
+            if (hitParticle.hitT < m_kbuffer[0].hitT) {
+                m_kbuffer[0].hitT = HitParticle::InvalidHitT;
+                }
         } else {
             m_numHits++;
         }
@@ -81,8 +83,12 @@ struct HitParticleKBuffer {
         return m_kbuffer[K-1];
     }
 
-    inline __device__ const HitParticle& farthestHit(const HitParticle&) const {
-        return m_kbuffer[0];
+    inline __device__ const HitParticle& farthestHit(const HitParticle& hitParticle) const {
+        if (hitParticle.hitT > m_kbuffer[0].hitT) {
+            return hitParticle;
+        } else {
+            return m_kbuffer[0];
+        }
     }
 
 private:
@@ -188,29 +194,59 @@ struct GUTKBufferRenderer : Params {
         }
     }
 
+    // template <typename TRayPayload>
+    // // not using the densityIntegrateHit or the featureIntegrateFwd for now
+    // static inline __device__ void processHitParticle_tail(
+    //     TRayPayload& ray,
+    //     const HitParticle& hitParticle,
+    //     const Particles& particles,
+    //     const TFeaturesVec* __restrict__ particleFeatures,
+    //     TFeaturesVec& tailFeaturesSum,
+    //     float& tailAlphaSum,
+    //     float& tailTransmittance) {
+
+    //     // features are color calculated in sphericalHarmonics.slang
+    //     // or "inline __device__ void initializeFeatures(threedgut::MemoryHandles parameters)"
+    //     TFeaturesVec features = Params::PerRayParticleFeatures ? particles.featuresFromBuffer(hitParticle.idx, ray.direction) : tcnn::max(particleFeatures[hitParticle.idx], 0.f);
+
+    //     tailAlphaSum += hitParticle.alpha;
+    //     // in HTGS: transmittance_tail *= 1.0f - rgba.w;
+    //     tailTransmittance *= (1.0f - hitParticle.alpha);
+
+    //     #pragma unroll
+    //     for (int i = 0; i < Particles::FeaturesDim; ++i) {
+    //         tailFeaturesSum[i] += features[i] * hitParticle.alpha;
+    //     }
+
+    //     if (ray.transmittance < Particles::MinTransmittanceThreshold) {
+    //         ray.kill();
+    //     }
+    // }
     template <typename TRayPayload>
-    // not using the densityIntegrateHit or the featureIntegrateFwd for now
     static inline __device__ void processHitParticle_tail(
         TRayPayload& ray,
         const HitParticle& hitParticle,
         const Particles& particles,
         const TFeaturesVec* __restrict__ particleFeatures,
-        TFeaturesVec& tailFeaturesSum,
-        float& tailAlphaSum,
-        float& tailTransmittance) {
+        TFeaturesVec* __restrict__ particleFeaturesGradient) {
+        // forward
+        const float hitWeight =
+            particles.densityIntegrateHit_tail(hitParticle.alpha,
+                                            ray.transmittance,
+                                            hitParticle.hitT,
+                                            ray.hitT);
 
-        // features are color calculated in sphericalHarmonics.slang
-        TFeaturesVec features = Params::PerRayParticleFeatures ? particles.featuresFromBuffer(hitParticle.idx, ray.direction) : tcnn::max(particleFeatures[hitParticle.idx], 0.f);
+        // so the final raidance ends up in ray.features, which is color
+        particles.featureIntegrateFwd_tail(hitWeight,
+                                        Params::PerRayParticleFeatures ? particles.featuresFromBuffer(hitParticle.idx, ray.direction) : tcnn::max(particleFeatures[hitParticle.idx], 0.f),
+                                        ray.features);
 
-        tailAlphaSum += hitParticle.alpha;
-        // in HTGS: transmittance_tail *= 1.0f - rgba.w;
-        tailTransmittance *= (1.0f - hitParticle.alpha);
+        if (hitWeight > 0.0f)
+            ray.countHit();
 
-        #pragma unroll
-        for (int i = 0; i < Particles::FeaturesDim; ++i) {
-            tailFeaturesSum[i] += features[i] * hitParticle.alpha;
+        if (ray.transmittance < Particles::MinTransmittanceThreshold) {
+            ray.kill();
         }
-
     }
 
     template <typename TRay>
@@ -274,9 +310,9 @@ struct GUTKBufferRenderer : Params {
         HitParticleKBuffer<Params::KHitBufferSize> hitParticleKBuffer;
 
         // tail variables
-        TFeaturesVec tailFeaturesSum = TFeaturesVec::zero();
-        float tailAlphaSum = 0.0f;
-        float tailTransmittance = 1.0f;
+        // TFeaturesVec tailFeaturesSum = TFeaturesVec::zero();
+        // float tailAlphaSum = 0.0f;
+        // float tailTransmittance = 1.0f;
 
         for (uint32_t i = 0; i < tileNumBlocksToProcess; i++, tileNumParticlesToProcess -= GUTParameters::Tiling::BlockSize) {
 
@@ -320,10 +356,10 @@ struct GUTKBufferRenderer : Params {
                     if (hitParticleKBuffer.full()) {
                         // process the farthest hit particle, which is at m_kbuffer[0]
                         processHitParticle_tail(ray,
-                                           hitParticleKBuffer.farthestHitHit(hitParticle),
-                                           particles,
-                                           particleFeaturesBuffer,
-                                           particleFeaturesGradientBuffer);
+                                                hitParticleKBuffer[i],
+                                                particles,
+                                                particleFeaturesBuffer,
+                                                particleFeaturesGradientBuffer);
                     }
                     hitParticleKBuffer.insert(hitParticle);
                 }
@@ -332,25 +368,31 @@ struct GUTKBufferRenderer : Params {
 
         if constexpr (Params::KHitBufferSize > 0) {
             // process core
-            for (int i = 0; ray.isAlive() && (i < hitParticleKBuffer.numHits()); ++i) {
+            int totalHits = static_cast<int>(hitParticleKBuffer.numHits());
+
+            for (int count = 0; ray.isAlive() && (count < totalHits); ++count) {
+                // Calculate index going backward from the closest slot
+                int i = Params::KHitBufferSize - 1 - count;
+
                 processHitParticle(ray,
-                                   hitParticleKBuffer[Params::KHitBufferSize - hitParticleKBuffer.numHits() + i],
+                                   hitParticleKBuffer[i],
                                    particles,
                                    particleFeaturesBuffer,
                                    particleFeaturesGradientBuffer);
             }
 
-            if (tailAlphaSum > 0.0f) {
-                float alphaSumRcp = 1.0f / tailAlphaSum;
-                // in HTGS: weighted_rgb_tail = transmittance_core * (1.0f - transmittance_tail) * alpha_sum_tail_rcp * rgb_tail;
-                float tailWeight = ray.transmittance * (1.0f - tailTransmittance) * alphaSumRcp;
+            // if (tailAlphaSum > 0.0f) {
+            //     float alphaSumRcp = 1.0f / tailAlphaSum;
+            //     // in HTGS: weighted_rgb_tail = transmittance_core * (1.0f - transmittance_tail) * alpha_sum_tail_rcp * rgb_tail;
+            //     float tailWeight = ray.transmittance * (1.0f - tailTransmittance) * alphaSumRcp;
 
-                #pragma unroll
-                for (int i = 0; i < Particles::FeaturesDim; ++i) {
-                    // ray.features is color, in HTGS: rgb_pixel += weighted_rgb_tail;
-                    ray.features[i] += tailWeight * tailFeaturesSum[i];
-                }
-            }
+            //     #pragma unroll
+            //     for (int i = 0; i < Particles::FeaturesDim; ++i) {
+            //         // ray.features is color, in HTGS: rgb_pixel += weighted_rgb_tail;
+            //         // its a vec<3>
+            //         ray.features[i] += tailWeight * tailFeaturesSum[i];
+            //     }
+            // }
         }
     }
 

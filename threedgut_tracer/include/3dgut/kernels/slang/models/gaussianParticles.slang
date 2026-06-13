@@ -262,6 +262,38 @@ float integrateHit<let backToFront : bool>(
 }
 
 [BackwardDifferentiable][ForceInline]
+float integrateHit_tail<let backToFront : bool>(
+    in float alpha,
+    inout float transmittance, // this get composite
+    in float depth,
+    inout float integratedDepth, // this get composite
+    no_diff bool enableNormal,
+    in float3 normal,
+    inout float3 integratedNormal)
+{
+   const float weight = backToFront ? alpha : alpha * transmittance;
+   if (backToFront)
+   {
+       integratedDepth = lerp(integratedDepth, depth, alpha);
+       if (enableNormal)
+       {
+           integratedNormal = lerp(integratedNormal, normal, alpha);
+       }
+   }
+   else
+   {
+       integratedDepth += depth * weight;
+       if (enableNormal)
+       {
+            integratedNormal += normal * weight;
+       }
+   }
+
+   transmittance *= (1 - alpha);
+   return weight;
+}
+
+[BackwardDifferentiable][ForceInline]
 float processHitFromBuffer<let backToFront : bool>(
     no_diff float3 rayOrigin,
     no_diff float3 rayDirection,
@@ -368,6 +400,25 @@ inline bool particleDensityHit(
     inout float3 integratedNormal)
 {
     return gaussianParticle.integrateHit<false>(
+        alpha,
+        transmittance,
+        depth,
+        integratedDepth,
+        enableNormal,
+        normal,
+        integratedNormal);
+}
+
+[CudaDeviceExport] inline float particleDensityIntegrateHit_tail(
+    in float alpha,
+    inout float transmittance,
+    in float depth,
+    inout float integratedDepth,
+    in bool enableNormal,
+    in float3 normal,
+    inout float3 integratedNormal)
+{
+    return gaussianParticle.integrateHit_tail<false>(
         alpha,
         transmittance,
         depth,
