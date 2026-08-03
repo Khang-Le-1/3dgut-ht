@@ -101,17 +101,18 @@ void integrateRadiance<let backToFront : bool>(float weight,
 [BackwardDifferentiable][ForceInline]
 void integrateRadiance_tail<let backToFront : bool>(float weight,
                                                in vector<float, Dim> radiance,
-                                               inout vector<float, Dim> integratedRadiance)
+                                               inout vector<float, Dim> integratedRadiance_tail)
 {
     if (weight > 0.0f)
     {
         if (backToFront)
         {
-            integratedRadiance = lerp(integratedRadiance, radiance, weight);
+            integratedRadiance_tail = lerp(integratedRadiance_tail, radiance, weight);
         }
         else
         {
-            integratedRadiance += radiance * weight;
+            // basically HTGS's rgba_premultiplied_tail
+            integratedRadiance_tail += radiance * weight;
         }
     }
 }
@@ -189,6 +190,17 @@ inline void particleFeaturesIntegrateFwd_tail(in float weight,
         features,
         integratedFeatures
     );
+}
+
+// compute tail
+[CudaDeviceExport]
+inline void compute_tail_radiance()
+{
+    // compute tail
+    // const float alpha_sum_tail_rcp = 1.0f / rgba_premultiplied_tail.w;
+    // const float3 rgb_tail = make_float3(rgba_premultiplied_tail);
+    // weighted_rgb_tail = transmittance_core * (1.0f - transmittance_tail) * alpha_sum_tail_rcp * rgb_tail;
+    // rgb_pixel += weighted_rgb_tail;
 }
 
 [CudaDeviceExport] inline void particleFeaturesIntegrateFwdFromBuffer(in float3 incidentDirection,

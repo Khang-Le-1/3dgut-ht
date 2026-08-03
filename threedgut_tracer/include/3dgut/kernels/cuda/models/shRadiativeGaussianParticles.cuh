@@ -318,6 +318,12 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
                                      reinterpret_cast<float3*>(&integratedFeatures));
     }
 
+    // compute tail
+    __forceinline__ __device__ void compute_tail() const {
+
+        compute_tail_radiance();
+    }
+
     __forceinline__ __device__ void featuresIntegrateFwdFromBuffer(const tcnn::vec3& incidentDirection,
                                                                    float weight,
                                                                    uint32_t particleIdx, TFeaturesVec integratedFeatures) const {

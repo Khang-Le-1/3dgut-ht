@@ -264,14 +264,14 @@ float integrateHit<let backToFront : bool>(
 [BackwardDifferentiable][ForceInline]
 float integrateHit_tail<let backToFront : bool>(
     in float alpha,
-    inout float transmittance, // this get composite
+    inout float transmittance_tail, // this get composite
     in float depth,
     inout float integratedDepth, // this get composite
     no_diff bool enableNormal,
     in float3 normal,
     inout float3 integratedNormal)
 {
-   const float weight = backToFront ? alpha : alpha * transmittance;
+   const float weight = alpha;
    if (backToFront)
    {
        integratedDepth = lerp(integratedDepth, depth, alpha);
@@ -289,7 +289,7 @@ float integrateHit_tail<let backToFront : bool>(
        }
    }
 
-   transmittance *= (1 - alpha);
+   transmittance_tail *= (1 - alpha);
    return weight;
 }
 
